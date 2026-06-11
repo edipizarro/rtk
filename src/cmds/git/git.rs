@@ -447,29 +447,16 @@ fn run_log(
         cmd.args(["--pretty=format:%h %s (%ar) <%an>%n%b%n---END---"]);
     }
 
-    // Determine limit: respect user's explicit -N flag, use sensible defaults otherwise
+    // The command runs exactly as the user wrote it — no implicit -N cap and
+    // no --no-merges. Without an explicit -N the display is capped instead,
+    // with a visible note, so unbounded logs don't flood the context.
     let (limit, user_set_limit) = if has_limit_flag {
-        // User explicitly passed -N / -n N / --max-count=N → respect their choice
-        let n = parse_user_limit(args).unwrap_or(10);
-        (n, true)
+        (parse_user_limit(args).unwrap_or(10), true)
     } else if has_format_flag {
-        // --oneline / --pretty without -N: user wants compact output, allow more
-        cmd.arg("-50");
         (50, false)
     } else {
-        // No flags at all: default to 10
-        cmd.arg("-10");
         (10, false)
     };
-
-    // Only add --no-merges if user didn't explicitly request merge commits
-    let wants_merges = args
-        .iter()
-        .any(|arg| arg == "--merges" || arg == "--min-parents=2" || arg == "--no-merges");
-    // Don't add --no-merges if user explicitly requested merges or an exact count (-n N / --max-count)
-    if !wants_merges && !has_limit_flag {
-        cmd.arg("--no-merges");
-    }
 
     // Pass all user arguments
     for arg in args {
@@ -559,12 +546,18 @@ pub(crate) fn filter_log_output(
     if user_format {
         let lines: Vec<&str> = output.lines().collect();
         let max_lines = if user_set_limit { lines.len() } else { limit };
-        return lines
+        let mut shown: Vec<String> = lines
             .iter()
             .take(max_lines)
             .map(|l| truncate_line(l, truncate_width))
-            .collect::<Vec<_>>()
-            .join("\n");
+            .collect();
+        if lines.len() > max_lines {
+            shown.push(format!(
+                "[+{} more lines — pass -n <count> to see more]",
+                lines.len() - max_lines
+            ));
+        }
+        return shown.join("\n");
     }
 
     // RTK injected format: split output into commit blocks separated by ---END---
@@ -607,6 +600,14 @@ pub(crate) fn filter_log_output(
             }
             result.push(entry);
         }
+    }
+
+    let total_commits = commits.iter().filter(|b| !b.trim().is_empty()).count();
+    if total_commits > max_commits {
+        result.push(format!(
+            "[+{} more commits — pass -n <count> to see more]",
+            total_commits - max_commits
+        ));
     }
 
     result.join("\n").trim().to_string()
@@ -1343,12 +1344,10 @@ fn run_branch(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
         return Ok(0);
     }
 
-    // List mode: show compact branch list
+    // List mode: show compact branch list. The command runs exactly as the
+    // user wrote it — no implicit -a; pass -a explicitly for remote branches.
     let mut cmd = git_cmd(global_args);
     cmd.arg("branch");
-    if !has_list_flag {
-        cmd.arg("-a");
-    }
     cmd.arg("--no-color");
     for arg in args {
         cmd.arg(arg);
@@ -1372,24 +1371,10 @@ fn run_branch(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
     let filtered = filter_branch_output(&result.stdout);
     println!("{}", filtered);
 
-    // When `-a` was added implicitly, the user's command was a plain
-    // `git branch`: the savings baseline must exclude the remote branches
-    // the user never asked for, otherwise savings are wildly overstated.
-    let baseline = if has_list_flag {
-        result.stdout.clone()
-    } else {
-        result
-            .stdout
-            .lines()
-            .filter(|line| !line.trim_start().starts_with("remotes/"))
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
-
     timer.track(
         &format!("git branch {}", args.join(" ")),
         &format!("rtk git branch {}", args.join(" ")),
-        &baseline,
+        &result.stdout,
         &filtered,
     );
 
@@ -2235,7 +2220,9 @@ A  added.rs
             .collect::<Vec<_>>()
             .join("\n");
         let result = filter_log_output(&output, 5, false, false);
-        assert_eq!(result.lines().count(), 5);
+        // 5 commits plus the visible truncation note
+        assert_eq!(result.lines().count(), 6);
+        assert!(result.contains("[+15 more commits"));
     }
 
     #[test]
@@ -2473,9 +2460,10 @@ no changes added to commit (use "git add" and/or "git commit -a")
         let result = filter_log_output(oneline_output, 3, true, true);
         assert_eq!(result.lines().count(), 5);
 
-        // user_set_limit=false means cap at limit
+        // user_set_limit=false means cap at limit, plus the truncation note
         let result = filter_log_output(oneline_output, 3, false, true);
-        assert_eq!(result.lines().count(), 3);
+        assert_eq!(result.lines().count(), 4);
+        assert!(result.contains("[+2 more lines"));
     }
 
     /// Regression test: `git branch <name>` must create, not list.

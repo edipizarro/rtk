@@ -50,17 +50,17 @@ pub fn run(args: &[String], verbose: u8) -> Result<i32> {
 
     let mut cmd = resolved_command("ls");
     cmd.env("LC_ALL", "C");
-    cmd.arg("-la");
+    // -l is required to parse the long-format columns; hidden entries (-a)
+    // appear only when the user asks for them.
+    cmd.arg("-l");
     for flag in &flags {
         if flag.starts_with("--") {
-            if *flag != "--all" {
-                cmd.arg(flag);
-            }
+            cmd.arg(flag);
         } else {
             let stripped = flag.trim_start_matches('-');
             let extra: String = stripped
                 .chars()
-                .filter(|c| *c != 'l' && *c != 'a' && *c != 'h')
+                .filter(|c| *c != 'l' && *c != 'h')
                 .collect();
             if !extra.is_empty() {
                 cmd.arg(format!("-{}", extra));

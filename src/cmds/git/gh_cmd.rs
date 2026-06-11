@@ -724,7 +724,6 @@ fn list_runs(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<i32> 
         "--json",
         "databaseId,name,status,conclusion,createdAt",
     ]);
-    cmd.arg("--limit").arg("10");
     for arg in args {
         cmd.arg(arg);
     }
