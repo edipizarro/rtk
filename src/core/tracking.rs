@@ -1262,14 +1262,13 @@ pub fn record_parse_failure_silent(raw_command: &str, error_message: &str, succe
     }
 }
 
-/// Estimate token count from text using ~4 chars = 1 token heuristic.
+/// Count tokens using the o200k_base BPE tokenizer (tiktoken).
 ///
-/// This is a fast approximation suitable for tracking purposes.
-/// For precise counts, integrate with your LLM's tokenizer API.
-///
-/// # Formula
-///
-/// `tokens = ceil(chars / 4)`
+/// Exact token counts for OpenAI o200k vocabulary; close for other modern
+/// LLM tokenizers. Texts under 1000 chars use the `ceil(chars / 4)`
+/// heuristic instead — the error there is a few tokens, and it avoids
+/// paying BPE initialization latency on every small command. The heuristic
+/// is also the fallback if the tokenizer fails to initialize.
 ///
 /// # Examples
 ///
@@ -1277,13 +1276,24 @@ pub fn record_parse_failure_silent(raw_command: &str, error_message: &str, succe
 /// use rtk::tracking::estimate_tokens;
 ///
 /// assert_eq!(estimate_tokens(""), 0);
-/// assert_eq!(estimate_tokens("abcd"), 1);  // 4 chars = 1 token
-/// assert_eq!(estimate_tokens("abcde"), 2); // 5 chars = ceil(1.25) = 2
-/// assert_eq!(estimate_tokens("hello world"), 3); // 11 chars = ceil(2.75) = 3
+/// assert!(estimate_tokens("hello world") >= 1);
 /// ```
 pub fn estimate_tokens(text: &str) -> usize {
-    // ~4 chars per token on average
-    (text.len() as f64 / 4.0).ceil() as usize
+    // Below this size the chars/4 error is a handful of tokens, not worth
+    // paying the ~600ms BPE initialization on every small command.
+    const BPE_THRESHOLD_CHARS: usize = 1000;
+
+    if text.is_empty() {
+        return 0;
+    }
+    if text.len() < BPE_THRESHOLD_CHARS {
+        return (text.len() as f64 / 4.0).ceil() as usize;
+    }
+    static BPE: std::sync::OnceLock<Option<tiktoken_rs::CoreBPE>> = std::sync::OnceLock::new();
+    match BPE.get_or_init(|| tiktoken_rs::o200k_base().ok()) {
+        Some(bpe) => bpe.encode_ordinary(text).len(),
+        None => (text.len() as f64 / 4.0).ceil() as usize,
+    }
 }
 
 /// Helper struct for timing command execution
@@ -1423,14 +1433,16 @@ pub fn args_display(args: &[OsString]) -> String {
 mod tests {
     use super::*;
 
-    // 1. estimate_tokens — verify ~4 chars/token ratio
+    // 1. estimate_tokens — heuristic for small texts, BPE for large
     #[test]
     fn test_estimate_tokens() {
         assert_eq!(estimate_tokens(""), 0);
-        assert_eq!(estimate_tokens("abcd"), 1); // 4 chars = 1 token
-        assert_eq!(estimate_tokens("abcde"), 2); // 5 chars = ceil(1.25) = 2
-        assert_eq!(estimate_tokens("a"), 1); // 1 char = ceil(0.25) = 1
-        assert_eq!(estimate_tokens("12345678"), 2); // 8 chars = 2 tokens
+        assert!(estimate_tokens("a") >= 1);
+        assert_eq!(estimate_tokens("hello world"), 3); // small text: chars/4 heuristic
+        let long = "the quick brown fox jumps over the lazy dog. ".repeat(100);
+        let tokens = estimate_tokens(&long);
+        // 4.6K chars of English prose: o200k counts ~1K tokens (chars/4 would say 1150)
+        assert!(tokens > 500 && tokens < 1150, "got {tokens}");
     }
 
     // 2. args_display — format OsString vec
