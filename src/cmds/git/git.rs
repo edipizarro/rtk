@@ -1372,10 +1372,24 @@ fn run_branch(args: &[String], verbose: u8, global_args: &[String]) -> Result<i3
     let filtered = filter_branch_output(&result.stdout);
     println!("{}", filtered);
 
+    // When `-a` was added implicitly, the user's command was a plain
+    // `git branch`: the savings baseline must exclude the remote branches
+    // the user never asked for, otherwise savings are wildly overstated.
+    let baseline = if has_list_flag {
+        result.stdout.clone()
+    } else {
+        result
+            .stdout
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("remotes/"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
     timer.track(
         &format!("git branch {}", args.join(" ")),
         &format!("rtk git branch {}", args.join(" ")),
-        &result.stdout,
+        &baseline,
         &filtered,
     );
 
